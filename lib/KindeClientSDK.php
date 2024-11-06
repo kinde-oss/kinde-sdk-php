@@ -3,6 +3,7 @@
 namespace Kinde\KindeSDK;
 
 use Exception;
+use GuzzleHttp\Exception\GuzzleException;
 use InvalidArgumentException;
 use GuzzleHttp\Client;
 use Kinde\KindeSDK\Sdk\OAuth2\PKCE;
@@ -23,12 +24,12 @@ class KindeClientSDK
     public string $domain;
 
     /**
-     * @var string This is the redirect URI that you provided when you registered your application.
+     * @var ?string This is the redirect URI that you provided when you registered your application.
      */
     public ?string $redirectUri;
 
     /**
-     * @var string This is the logout redirect URI that you provided when you registered your application.
+     * @var ?string This is the logout redirect URI that you provided when you registered your application.
      */
     public ?string $logoutRedirectUri;
 
@@ -60,7 +61,7 @@ class KindeClientSDK
     /* A variable that is used to store the grant type that you want to use. */
     public string $grantType;
 
-    /* This is a additionalParameters data. */
+    /** @var array<string, string> $additionalParameters This is a additionalParameters data. */
     public array $additionalParameters;
 
     /**
@@ -71,8 +72,20 @@ class KindeClientSDK
     /* A variable that is used to store the protocol that you want to use when the SDK requests to get a token */
     public string $protocol;
 
-    public $storage;
+    public Storage $storage;
 
+    /**
+     * @param string $domain
+     * @param string|null $redirectUri
+     * @param string $clientId
+     * @param string $clientSecret
+     * @param string $grantType
+     * @param string|null $logoutRedirectUri
+     * @param string $scopes
+     * @param array<string, string> $additionalParameters
+     * @param string $protocol
+     * @param Storage|null $storage
+     */
     function __construct(
         string $domain,
         ?string $redirectUri,
@@ -82,7 +95,8 @@ class KindeClientSDK
         ?string $logoutRedirectUri,
         string $scopes = 'openid profile email offline',
         array $additionalParameters = [],
-        string $protocol = ""
+        string $protocol = "",
+        ?Storage $storage = null
     ) {
         $isNotCCGrantType = $grantType !== GrantType::clientCredentials;
 
@@ -135,70 +149,63 @@ class KindeClientSDK
         $this->tokenEndpoint = $this->domain . '/oauth2/token';
         $this->logoutEndpoint = $this->domain . '/logout';
 
-        $this->storage = Storage::getInstance();
+        $this->storage = $storage ?? Storage::getInstance();
         $this->storage->setJwksUrl($this->domain . '/.well-known/jwks.json');
     }
 
     /**
      * Performs user login and returns the authentication result.
      *
-     * @param array $additionalParameters Additional parameters for authentication (optional).
+     * @param array<string, string> $additionalParameters Additional parameters for authentication (optional).
      *
-     * @return AuthenticationResult The authentication result.
+     * @return object{'access_token': string, 'expires_in': int, 'id_token': string, 'refresh_token': string, 'scope': string, 'token_type': string}|void The authentication result.
      *
      * @throws InvalidArgumentException When an incorrect grant_type is provided.
-     * @throws Throwable                  When an error occurs during authentication.
+     * @throws \Throwable                  When an error occurs during authentication.
      */
     public function login(
         array $additionalParameters = []
     ) {
         $this->cleanStorage();
-        try {
-            switch ($this->grantType) {
-                case GrantType::clientCredentials:
-                    $auth = new ClientCredentials();
-                    return $auth->authenticate($this, $additionalParameters);
-                case GrantType::authorizationCode:
-                    $auth = new AuthorizationCode();
-                    return $auth->authenticate($this, $additionalParameters);
-                case GrantType::PKCE:
-                    $auth = new PKCE();
-                    return $auth->authenticate($this, 'login', $additionalParameters);
-                default:
-                    throw new InvalidArgumentException("Please provide correct grant_type");
-                    break;
-            }
-        } catch (\Throwable $th) {
-            throw $th;
+        switch ($this->grantType) {
+            case GrantType::clientCredentials:
+                $auth = new ClientCredentials();
+                return $auth->authenticate($this, $additionalParameters);
+            case GrantType::authorizationCode:
+                $auth = new AuthorizationCode();
+                $auth->authenticate($this, $additionalParameters);
+                break;
+            case GrantType::PKCE:
+                $auth = new PKCE();
+                $auth->authenticate($this, 'login', $additionalParameters);
+                break;
+            default:
+                throw new InvalidArgumentException("Please provide correct grant_type");
         }
     }
 
     /**
      * Registers the user and returns the authentication result.
      *
-     * @param array $additionalParameters Additional parameters for registration (optional).
-     *
-     * @return AuthenticationResult The authentication result.
+     * @param array<string, string> $additionalParameters Additional parameters for registration (optional).
      */
-    public function register(array $additionalParameters = [])
+    public function register(array $additionalParameters = []): void
     {
         $this->grantType = 'authorization_code';
 
         $auth = new PKCE();
-        return $auth->authenticate($this, 'registration', $additionalParameters);
+        $auth->authenticate($this, 'registration', $additionalParameters);
     }
 
     /**
      * Creates an organization and returns the authentication result.
      *
-     * @param array $additionalParameters Additional parameters for organization creation (optional).
-     *
-     * @return AuthenticationResult The authentication result.
+     * @param array<string, string> $additionalParameters Additional parameters for organization creation (optional).
      */
-    public function createOrg(array $additionalParameters = [])
+    public function createOrg(array $additionalParameters = []): void
     {
         $additionalParameters['is_create_org'] = 'true';
-        return $this->register($additionalParameters);
+        $this->register($additionalParameters);
     }
 
     /**
@@ -206,21 +213,26 @@ class KindeClientSDK
      *
      * @return void
      */
-    public function logout()
+    public function logout(): void
     {
         $this->cleanStorage();
 
-        $searchParams = [
-            'redirect' => $this->logoutRedirectUri
-        ];
-        header('Location: ' . $this->logoutEndpoint . '?' . http_build_query($searchParams));
+        header('Location: ' . $this->getLogoutUrl());
         exit();
     }
 
+    public function getLogoutUrl(): string
+    {
+        $searchParams = [
+            'redirect' => $this->logoutRedirectUri
+        ];
+        return $this->logoutEndpoint . '?' . http_build_query($searchParams);
+    }
+    
     /**
      * Retrieves the access token for authentication.
      *
-     * @return AccessToken|null The access token or null if not available.
+     * @return object{'access_token': string, 'expires_in': int, 'id_token': string, 'refresh_token': string, 'scope': string, 'token_type': string}|null The access token or null if not available.
      *
      * @throws OAuthException        When an OAuth-related error occurs.
      * @throws InvalidArgumentException When required parameters are missing or invalid.
@@ -231,7 +243,7 @@ class KindeClientSDK
             return $this->login();
         }
         // Check authenticated
-        if ($this->isAuthenticated) {
+        if ($this->isAuthenticated()) {
             $token = $this->storage->getToken(false);
             if (!empty($token)) {
                 return $token;
@@ -281,9 +293,9 @@ class KindeClientSDK
     /**
      * Retrieves the user details from the storage.
      *
-     * @return UserProfile The user profile or null if not available.
+     * @return array{'id': string, 'given_name': string, 'family_name': string, 'email': string, 'picture': string} The user profile (with empty properties if not available)
      */
-    public function getUserDetails()
+    public function getUserDetails(): array
     {
         return $this->storage->getUserProfile();
     }
@@ -296,12 +308,12 @@ class KindeClientSDK
      *
      * @return array An associative array containing the name and value of the claim, or null if the claim doesn't exist.
      */
-    public function getClaim(string $keyName, string $tokenType = TokenType::ACCESS_TOKEN)
+    public function getClaim(string $keyName, string $tokenType = TokenType::ACCESS_TOKEN): array
     {
         $claims = self::getClaims($tokenType);
 
         if (!array_key_exists($keyName, $claims)) {
-            error_log("The value of '{$keyName}' claimed does not exist in your token");
+            error_log("The value of '$keyName' claimed does not exist in your token");
         }
         return [
             'name' => $keyName,
@@ -312,9 +324,9 @@ class KindeClientSDK
     /**
      * Retrieves the organization code and permissions from the claims.
      *
-     * @return array An associative array containing the organization code and permissions.
+     * @return array{'orgCode': string|null, 'permissions': array<string>} An associative array containing the organization code and permissions.
      */
-    public function getPermissions()
+    public function getPermissions(): array
     {
         $claims = self::getClaims();
 
@@ -329,7 +341,7 @@ class KindeClientSDK
      *
      * @param string $permission The permission to check.
      *
-     * @return array An associative array containing the organization code and a boolean indicating if the permission is granted.
+     * @return array{'orgCode': string|null, 'isGranted': boolean} An associative array containing the organization code and a boolean indicating if the permission is granted.
      */
     public function getPermission(string $permission)
     {
@@ -422,7 +434,7 @@ class KindeClientSDK
      *
      * @return array An associative array containing the flag code, type, value, and a boolean indicating if the default value was used.
      */
-    public function getFlag(string $flagName, array $options = [], string $flagType = null)
+    public function getFlag(string $flagName, array $options = [], string $flagType = null): array
     {
         $isUsedDefault = false;
         $flag = self::getFeatureFlags($flagName);
@@ -436,13 +448,13 @@ class KindeClientSDK
         }
 
         if (!isset($flag['v'])) {
-            throw new UnexpectedValueException("This flag '{$flagName}' was not found, and no default value has been provided");
+            throw new UnexpectedValueException("This flag '$flagName' was not found, and no default value has been provided");
         }
         $flagTypeParsed = Utils::$listType[$flag['t']];
 
         $requestType = $flagType ? Utils::$listType[$flagType] : null;
         if (isset($requestType) && $flagTypeParsed != $requestType) {
-            throw new UnexpectedValueException("Flag '{$flagName}' is type {$flagTypeParsed} - requested type {$requestType}");
+            throw new UnexpectedValueException("Flag '$flagName' is type $flagTypeParsed - requested type $requestType");
         }
 
         return [
@@ -475,7 +487,7 @@ class KindeClientSDK
         $flags = self::getClaim('feature_flags')['value'];
 
         if (isset($name) && ! array_key_exists($name, $flags)) {
-            throw new InvalidArgumentException("The feature flag '{$name}' was not found");
+            throw new InvalidArgumentException("The feature flag '$name' was not found");
         }
 
         if (isset($name) && !empty($flags)) {
@@ -492,9 +504,9 @@ class KindeClientSDK
      *
      * @throws GuzzleException If an error occurs during the HTTP request.
      *
-     * @return mixed The decoded token response.
+     * @return object The decoded token response.
      */
-    private function fetchToken($formParams)
+    private function fetchToken($formParams): object
     {
         $client = new Client();
 
@@ -508,7 +520,7 @@ class KindeClientSDK
 
         $token = $response->getBody()->getContents();
         $this->storage->setToken($token);
-        $tokenDecode = json_decode($token, false);
+        $tokenDecode = json_decode($token, false, 512, JSON_THROW_ON_ERROR);
 
         // Cleaning
         $this->storage->removeItem(StorageEnums::CODE_VERIFIER);
@@ -551,7 +563,19 @@ class KindeClientSDK
 
         return false;
     }
+    
+    public function refreshWithToken(string $refreshToken)
+    {
+        $formParams = [
+            'client_id' => $this->clientId,
+            'client_secret' => $this->clientSecret,
+            'grant_type' => 'refresh_token',
+            'refresh_token' => $refreshToken
+        ];
 
+        $token = $this->fetchToken($formParams);
+        return $token;
+    }
     
     /**
      * Retrieves the claims from the specified token type.
@@ -561,7 +585,7 @@ class KindeClientSDK
      * @throws InvalidArgumentException If an invalid token type is provided.
      * @throws Exception If the token is empty or missing authentication credentials.
      *
-     * @return mixed The parsed claims from the token.
+     * @return array|null The parsed claims from the token.
      */
     private function getClaims(string $tokenType = TokenType::ACCESS_TOKEN)
     {
@@ -626,7 +650,6 @@ class KindeClientSDK
                 return 'client_credentials';
             default:
                 throw new InvalidArgumentException("Please provide correct grant_type");
-                break;
         }
     }
 }
